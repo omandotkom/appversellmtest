@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway Model Lab</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <strong>Gateway Model Lab</strong>
+    <span class="sub">monitoring &amp; benchmark model</span>
+  </div>
+  <div class="right">
+    <span id="gw-pill" class="pill muted">memuat…</span>
+    <button id="refresh-models" class="btn ghost">Refresh model</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button data-tab="functional" class="tab active">Tes Fungsional</button>
+  <button data-tab="bench" class="tab">Task Benchmark</button>
+  <button data-tab="perf" class="tab">Performance</button>
+  <button data-tab="history" class="tab">Riwayat</button>
+  <button data-tab="settings" class="tab">Settings</button>
+</nav>
+
+<main>
+  <section id="tab-functional" class="tabpane active">
+    <div class="grid2">
+      <div class="card">
+        <h2>Pilih model</h2>
+        <div id="fn-picker" class="picker"></div>
+      </div>
+      <div class="card">
+        <h2>Jalankan tes</h2>
+        <div id="fn-checks" class="checks">
+          <label><input type="checkbox" value="basic" checked> Chat dasar</label>
+          <label><input type="checkbox" value="streaming" checked> Streaming (TTFT)</label>
+          <label><input type="checkbox" value="tools" checked> Tool calling</label>
+          <label><input type="checkbox" value="json" checked> JSON mode</label>
+        </div>
+        <label class="switch"><input type="checkbox" id="fn-include-blocked"> Ikutkan model blocked</label>
+        <label class="field">Ulangi (multi-trial)
+          <select id="fn-repeat">
+            <option value="1">1× (cepat)</option>
+            <option value="3">3×</option>
+            <option value="5">5× (untuk p95)</option>
+          </select>
+        </label>
+        <label class="switch"><input type="checkbox" id="fn-warmup" checked> Warmup (buang request pertama)</label>
+        <p class="hint">Jika tidak ada model dipilih, semua model chat akan diuji.</p>
+        <button id="fn-start" class="btn primary">Mulai tes</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Hasil</h2>
+      <div id="fn-progress"></div>
+      <div id="fn-summary"></div>
+      <div id="fn-table"></div>
+    </div>
+  </section>
+
+  <section id="tab-bench" class="tabpane">
+    <div class="grid2">
+      <div class="card">
+        <h2>Pilih model</h2>
+        <div id="bench-picker" class="picker"></div>
+      </div>
+      <div class="card">
+        <h2>Konfigurasi benchmark</h2>
+        <label class="field">Task
+          <select id="bench-task"></select>
+        </label>
+        <label class="field">Max turn
+          <input type="number" id="bench-max-turns" value="30" min="1" max="200">
+        </label>
+        <label class="field">Token cap per model
+          <input type="number" id="bench-token-cap" value="150000" min="1000" step="1000">
+        </label>
+        <p class="hint">Estimasi kasar biaya: <strong id="bench-estimate">—</strong></p>
+        <button id="bench-start" class="btn primary">Mulai benchmark</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Hasil benchmark</h2>
+      <div id="bench-progress"></div>
+      <div id="bench-summary"></div>
+      <div id="bench-table"></div>
+    </div>
+  </section>
+
+  <section id="tab-perf" class="tabpane">
+    <div class="grid2">
+      <div class="card">
+        <h2>Pilih model</h2>
+        <div id="perf-picker" class="picker"></div>
+      </div>
+      <div class="card">
+        <h2>Konfigurasi</h2>
+        <label class="field">Mode
+          <select id="perf-mode">
+            <option value="load">Load / concurrency probe</option>
+            <option value="context">Context scaling</option>
+          </select>
+        </label>
+        <div id="perf-load-cfg">
+          <label class="field">Level concurrency (pisahkan koma)
+            <input id="perf-levels" value="1,2,4,8">
+          </label>
+          <label class="field">Request per level
+            <input type="number" id="perf-rpl" value="8" min="1">
+          </label>
+        </div>
+        <div id="perf-context-cfg" class="hidden">
+          <label class="field">Ukuran input (token, pisahkan koma)
+            <input id="perf-sizes" value="1000,8000,32000">
+          </label>
+        </div>
+        <p class="hint">Estimasi kasar biaya: <strong id="perf-estimate">—</strong></p>
+        <button id="perf-start" class="btn primary">Mulai</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Hasil</h2>
+      <div id="perf-progress"></div>
+      <div id="perf-summary"></div>
+      <div id="perf-table"></div>
+    </div>
+  </section>
+
+  <section id="tab-history" class="tabpane">
+    <div class="card">
+      <h2>Riwayat run</h2>
+      <div id="history-list"></div>
+    </div>
+    <div class="card">
+      <h2>Detail run</h2>
+      <div id="history-detail"><p class="muted">Pilih run di atas untuk melihat hasilnya.</p></div>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tabpane">
+    <div class="card narrow">
+      <h2>Koneksi gateway</h2>
+      <label class="field">Gateway URL
+        <input id="set-url" placeholder="http://localhost:4000">
+      </label>
+      <label class="field">Admin key (opsional)
+        <input id="set-admin-key" type="password" placeholder="••• tersimpan (kosongkan jika tidak mengubah)">
+      </label>
+      <label class="field">Virtual test key
+        <input id="set-test-key" type="password" placeholder="••• tersimpan (kosongkan jika tidak mengubah)">
+      </label>
+
+      <h2>Jalankan</h2>
+      <div class="grid2">
+        <label class="field">Concurrency fungsional
+          <input type="number" id="set-func-conc" min="1" max="50">
+        </label>
+        <label class="field">Concurrency benchmark
+          <input type="number" id="set-bench-conc" min="1" max="10">
+        </label>
+        <label class="field">Timeout per request (detik)
+          <input type="number" id="set-timeout" min="5">
+        </label>
+        <label class="field">Token cap benchmark
+          <input type="number" id="set-token-cap" min="1000" step="1000">
+        </label>
+      </div>
+      <p class="hint">Key disimpan di file <code>.env</code> lokal dan tidak pernah ditampilkan kembali.
+      Kosongkan kolom key jika tidak ingin mengubah nilainya.</p>
+      <div class="row">
+        <button id="set-save" class="btn primary">Simpan</button>
+        <button id="set-test" class="btn ghost">Uji koneksi</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="modal-title"></h3>
+      <button id="modal-close" class="btn ghost">Tutup</button>
+    </div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

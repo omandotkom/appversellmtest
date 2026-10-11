@@ -1,0 +1,21 @@
+id: landing-page
+name: "Landing Page SaaS (single file)"
+prompt: |
+  Build a single-file marketing landing page for a fictional SaaS product called
+  "Nimbus Notes" (a note-taking app with AI-powered summaries).
+
+  Requirements:
+  - Create exactly one file: index.html. All CSS must live in an embedded <style> tag;
+    no external stylesheets, no CDN links, no JavaScript frameworks.
+  - Use semantic HTML5 structure (header, main, sections, footer).
+  - Include a hero section with a headline, subheadline, and a call-to-action button.
+  - Include a features section with at least 3 distinct features.
+  - Include a footer with copyright text.
+  - Make the styling clean and readable for a modern SaaS page.
+
+  When the page is complete, reply with a short summary and stop calling tools.
+tools: [read_file, write_file, edit_file, list_files, grep]
+max_turns: 30
+artifacts:
+  - path: index.html
+    min_bytes: 800
