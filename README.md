@@ -13,6 +13,9 @@ dari tes fungsional cepat sampai benchmark tugas coding-agent dengan metrik erro
   jumlah turn, token, estimasi biaya, durasi.
 - **Performance suite**: tok/s, ITL, TTFT vs generation time, p50/p95 (multi-trial + warmup),
   load/concurrency probe (throughput + 429), context scaling (prefill tok/s), deteksi regresi.
+- **Speed Comparison**: tab chart komparasi performa antar model (Chart.js) — tok/s fungsional,
+  TTFT p50/p95, ITL, throughput load probe, prefill tok/s per ukuran context, tok/s benchmark —
+  plus overall score 0–100 tertimbang, diagregasi dari seluruh run historis di SQLite.
 - **Trace turn-by-turn** dan preview artefak hasil (iframe sandbox).
 - **History** run, simpan di SQLite.
 - UI single-page tanpa build step (FastAPI + vanilla JS).

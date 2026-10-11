@@ -111,6 +111,23 @@ def main() -> None:
     # history endpoint
     hist = client.get(f"{APP}/api/models/history", params={"model": "mock-good", "kind": "functional"}).json()
     assert "points" in hist and len(hist["points"]) >= 1, hist
+
+    # --- speed comparison ---
+    speed = client.get(f"{APP}/api/speed-comparison").json()
+    names = {m["model"]: m for m in speed["models"]}
+    assert "mock-good" in names, names
+    good_speed = names["mock-good"]
+    assert good_speed["metrics"]["functional_tok_per_s"]["value"] is not None
+    assert good_speed["metrics"]["load_throughput_rps"]["value"] is not None
+    assert good_speed["metrics"]["prefill_tok_per_s"]["value"] is not None
+    assert good_speed["metrics"]["bench_tok_per_s"]["value"] is not None
+    assert good_speed["score"] is not None and 0 <= good_speed["score"] <= 100
+    sorted_scores = [m["score"] for m in speed["models"] if m["score"] is not None]
+    assert sorted_scores == sorted(sorted_scores, reverse=True), sorted_scores
+    print(f"speed mock-good score={good_speed['score']} "
+          f"fn tok/s={good_speed['metrics']['functional_tok_per_s']['value']} "
+          f"load={good_speed['metrics']['load_throughput_rps']['value']} "
+          f"bench tok/s={good_speed['metrics']['bench_tok_per_s']['value']}")
     print("SMOKE OK")
 
 

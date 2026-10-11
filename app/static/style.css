@@ -215,3 +215,20 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 
 .hidden { display: none !important; }
 .spark { display: inline-block; vertical-align: middle; margin-left: 6px; }
+
+/* speed comparison charts */
+.chartbox { position: relative; height: 240px; }
+
+
+/* rank badges (1=emas, 2=perak, 3=perunggu, sisanya netral) */
+.rank {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 24px; height: 20px; padding: 0 6px; border-radius: 10px;
+  font-weight: 700; font-size: .75rem; border: 1px solid var(--border);
+  background: #eef0f4; color: #6b7684;
+}
+.rank.r1 { background: #fef3c7; border-color: #fbbf24; color: #92400e; }
+.rank.r2 { background: #e2e8f0; border-color: #94a3b8; color: #334155; }
+.rank.r3 { background: #fde8d7; border-color: #ea9a5d; color: #7c3f16; }
+.rank.na { opacity: .45; font-weight: 500; }
+

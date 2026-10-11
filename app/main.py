@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, gateway, perf, runner
+from . import config, db, gateway, perf, runner, speed
 from .agent import loop as agent_loop
 
 # The metric used for per-model regression/trend detection, per run kind.
@@ -413,6 +413,12 @@ def _detect_regressions(run_id: int, kind: str) -> int:
             db.update_run_model(row["id"], metrics=metrics)
             count += 1
     return count
+
+
+@app.get("/api/speed-comparison")
+def speed_comparison() -> dict:
+    """Per-model speed comparison (tok/s, TTFT, throughput) with overall score."""
+    return speed.comparison()
 
 
 @app.get("/api/models/history")

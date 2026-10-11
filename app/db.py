@@ -236,6 +236,13 @@ def get_steps(run_model_id: int) -> list[dict]:
     return _query("SELECT * FROM steps WHERE run_model_id=? ORDER BY id", (run_model_id,))
 
 
+def all_run_models_with_runs(kinds: list[str] | None = None) -> list[dict]:
+    """Every run_models row (with its run kind) across runs of the given kinds."""
+    opens = " AND r.kind IN (%s)" % ",".join("?" for _ in kinds) if kinds else ""
+    rows = _query(f"SELECT rm.*, r.kind FROM run_models rm JOIN runs r ON rm.run_id = r.id{opens}", tuple(kinds or []))
+    return [_load_json(row, ("checks", "metrics")) for row in rows]
+
+
 def model_history(model: str, kind: str, exclude_run_id: Optional[int], limit: int) -> list[dict]:
     """Metrics for a model across prior finished runs of a given kind."""
     if exclude_run_id is None:

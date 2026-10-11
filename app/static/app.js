@@ -77,6 +77,22 @@ function regBadge(metrics) {
   return `<span class="badge err" title="vs baseline ${reg.baseline} → ${reg.current} (${reg.delta_pct > 0 ? "+" : ""}${reg.delta_pct}%)">⚠ regresi ${reg.delta_pct > 0 ? "+" : ""}${reg.delta_pct}%</span>`;
 }
 
+/* ---------- ranking ---------- */
+const RANK_TITLE = { 1: "peringkat 1", 2: "peringkat 2", 3: "peringkat 3" };
+
+function rankBadge(rank) {
+  if (rank == null) return '<span class="rank na">—</span>';
+  return `<span class="rank r${Math.min(rank, 4)}" title="${RANK_TITLE[rank] || "peringkat " + rank}">${rank}</span>`;
+}
+
+function rankMap(models, getter, higherBetter) {
+  const rows = models.map((r) => ({ id: r.id, v: getter(r) })).filter((r) => r.v != null);
+  rows.sort((a, b) => higherBetter ? b.v - a.v : a.v - b.v);
+  const map = new Map();
+  rows.forEach((r, i) => map.set(r.id, i + 1));
+  return map;
+}
+
 function sparkline(values, w = 110, h = 26) {
   const vals = values.filter((v) => v != null);
   if (vals.length < 2) return "";
@@ -274,6 +290,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     btn.classList.add("active");
     $("#tab-" + btn.dataset.tab).classList.add("active");
     if (btn.dataset.tab === "history") loadHistory();
+    if (btn.dataset.tab === "speed") loadSpeed();
   });
 });
 
@@ -324,7 +341,8 @@ function renderFunctionalRun(data) {
 }
 
 function functionalTableHtml(models, actions) {
-  let html = `<div class="scroll"><table class="tbl"><thead><tr><th>Model</th><th>Status</th>`;
+  const ranks = rankMap(models, (r) => (r.metrics || {}).avg_latency_ms, false);
+  let html = `<div class="scroll"><table class="tbl"><thead><tr><th>Model</th><th>Rank</th><th>Status</th>`;
   for (const c of ["basic", "streaming", "tools", "json"]) html += `<th>${CHECK_LABELS[c]}</th>`;
   html += `<th>Latency</th><th>p95</th><th>tok/s</th>`;
   if (actions) html += `<th></th>`;
@@ -333,7 +351,7 @@ function functionalTableHtml(models, actions) {
     const checks = row.checks || {};
     const mm = row.metrics || {};
     const sc = checks.streaming || {};
-    html += `<tr><td class="mono">${esc(row.model)} ${regBadge(mm)}</td><td>${kvBadge(MODEL_STATUS, row.status)}</td>`;
+    html += `<tr><td class="mono">${esc(row.model)} ${regBadge(mm)}</td><td>${rankBadge(ranks.get(row.id))}</td><td>${kvBadge(MODEL_STATUS, row.status)}</td>`;
     for (const c of ["basic", "streaming", "tools", "json"]) {
       const r = checks[c];
       html += `<td>${r ? kvBadge(CHECK_STATUS, r.status).replace(">", ` title="${esc(r.error || r.note || "")}">`) : '<span class="badge muted">—</span>'}</td>`;
@@ -455,7 +473,8 @@ function renderBenchRun(data) {
 }
 
 function benchTableHtml(models, actions) {
-  let html = `<div class="scroll"><table class="tbl"><thead><tr><th>Model</th><th>Outcome</th><th>Tool calls</th><th>Error</th><th>Error rate</th><th>Recovery</th><th>TTFT</th><th>tok/s</th><th>Turn</th><th>Token</th><th>Biaya</th>`;
+  const ranks = rankMap(models, (r) => (r.metrics || {}).gen_tok_per_s, true);
+  let html = `<div class="scroll"><table class="tbl"><thead><tr><th>Model</th><th>Rank</th><th>Outcome</th><th>Tool calls</th><th>Error</th><th>Error rate</th><th>Recovery</th><th>TTFT</th><th>tok/s</th><th>Turn</th><th>Token</th><th>Biaya</th>`;
   if (actions) html += `<th></th>`;
   html += `</tr></thead><tbody>`;
   for (const row of models) {
@@ -467,7 +486,7 @@ function benchTableHtml(models, actions) {
       const color = rate === 0 ? "var(--ok)" : (rate <= 0.1 ? "var(--warn)" : "var(--err)");
       bar = `<div class="ratebar"><span style="width:${pct}%;background:${color}"></span></div>`;
     }
-    html += `<tr><td class="mono">${esc(row.model)} ${regBadge(m)}</td>
+    html += `<tr><td class="mono">${esc(row.model)} ${regBadge(m)}</td><td>${rankBadge(ranks.get(row.id))}</td>
       <td>${kvBadge(OUTCOMES, row.outcome || row.status)}</td>
       <td>${m.tool_calls ?? "—"}</td>
       <td>${m.tool_errors ?? "—"}</td>
@@ -622,7 +641,8 @@ function renderPerfRun(data) {
 }
 
 function loadTableHtml(models, actions) {
-  let html = `<div class="scroll"><table class="tbl"><thead><tr><th>Model</th><th>Status</th><th>Total req</th><th>429</th><th>Max throughput</th><th>p95</th>`;
+  const ranks = rankMap(models, (r) => (r.metrics || {}).max_throughput_rps, true);
+  let html = `<div class="scroll"><table class="tbl"><thead><tr><th>Model</th><th>Rank</th><th>Status</th><th>Total req</th><th>429</th><th>Max throughput</th><th>p95</th>`;
   if (actions) html += `<th></th>`;
   html += `</tr></thead><tbody>`;
   for (const row of models) {
@@ -630,7 +650,7 @@ function loadTableHtml(models, actions) {
     const levels = m.levels || [];
     const maxTp = m.max_throughput_rps;
     const p95s = levels.map((l) => l.p95_ms).filter((v) => v != null);
-    html += `<tr><td class="mono">${esc(row.model)} ${regBadge(m)}</td><td>${kvBadge(MODEL_STATUS, row.status)}</td>
+    html += `<tr><td class="mono">${esc(row.model)} ${regBadge(m)}</td><td>${rankBadge(ranks.get(row.id))}</td><td>${kvBadge(MODEL_STATUS, row.status)}</td>
       <td>${m.total_requests ?? "—"}</td><td>${m.total_429 ?? "—"}</td>
       <td>${maxTp != null ? maxTp + " rps" : "—"}</td>
       <td>${p95s.length ? fmtMs(Math.max(...p95s)) : "—"}</td>`;
@@ -641,12 +661,13 @@ function loadTableHtml(models, actions) {
 }
 
 function contextTableHtml(models, actions) {
-  let html = `<div class="scroll"><table class="tbl"><thead><tr><th>Model</th><th>Status</th><th>Max TTFT</th><th>Max prefill tok/s</th>`;
+  const ranks = rankMap(models, (r) => (r.metrics || {}).max_prefill_tok_per_s, true);
+  let html = `<div class="scroll"><table class="tbl"><thead><tr><th>Model</th><th>Rank</th><th>Status</th><th>Max TTFT</th><th>Max prefill tok/s</th>`;
   if (actions) html += `<th></th>`;
   html += `</tr></thead><tbody>`;
   for (const row of models) {
     const m = row.metrics || {};
-    html += `<tr><td class="mono">${esc(row.model)} ${regBadge(m)}</td><td>${kvBadge(MODEL_STATUS, row.status)}</td>
+    html += `<tr><td class="mono">${esc(row.model)} ${regBadge(m)}</td><td>${rankBadge(ranks.get(row.id))}</td><td>${kvBadge(MODEL_STATUS, row.status)}</td>
       <td>${fmtMs(m.max_ttft_ms)}</td><td>${fmtNum(m.max_prefill_tok_per_s)}</td>`;
     if (actions) html += `<td><button class="btn tiny" data-perf="${row.id}">Detail</button></td>`;
     html += `</tr>`;
@@ -676,6 +697,134 @@ function openPerfDetail(rmId, kind) {
     body += `</tbody></table></div>`;
   }
   openModal(row.model + (kind === "load" ? " — load probe" : " — context scaling"), body);
+}
+
+/* ---------- speed comparison ---------- */
+const chartRegistry = {};
+
+const SPEED_CHARTS = [
+  { id: "chart-fn-tokps", key: "functional_tok_per_s", label: "tok/s streaming", kind: "bar", unit: "tok/s" },
+  { id: "chart-ttft", key: "ttft_ms", label: "TTFT p50", kind: "bar", unit: "ms" },
+  { id: "chart-itl", key: "itl_ms", label: "ITL", kind: "bar", unit: "ms/token" },
+  { id: "chart-load", key: "load_throughput_rps", label: "throughput", kind: "bar", unit: "req/s" },
+  { id: "chart-prefill", key: "prefill", label: "prefill tok/s", kind: "line", unit: "tok/s" },
+  { id: "chart-bench", key: "bench_tok_per_s", label: "tok/s generation", kind: "bar", unit: "tok/s" },
+];
+
+const LEADER_COLORS = ["#4caf50", "#2196f3", "#ff9800", "#9c27b0", "#00bcd4", "#e91e63", "#8bc34a", "#673ab7", "#ffc107", "#009688"];
+
+function drawSpeedCharts(data) {
+  if (typeof Chart === "undefined") {
+    $("#speed-table").innerHTML = '<div class="muted">Chart.js gagal dimuat (CDN offline). Chart tidak tersedia.</div>';
+    return;
+  }
+  const models = data.models || [];
+  for (const def of SPEED_CHARTS) {
+    const canvas = document.getElementById(def.id);
+    if (!canvas) continue;
+    if (chartRegistry[def.id]) chartRegistry[def.id].destroy();
+    const holder = canvas.parentElement;
+    holder.querySelectorAll(".muted, .nodata").forEach((n) => n.remove());
+    let datasets = [];
+    let labels = [];
+
+    if (def.kind === "line") {
+      // prefill tok/s vs context size: one dataset (line) per model
+      const sizes = new Set();
+      for (const m of models) {
+        for (const lvl of (m.prefill_levels || [])) if (lvl.target_tokens) sizes.add(lvl.target_tokens);
+      }
+      labels = [...sizes].sort((a, b) => a - b).map(fmtTokens);
+      if (!labels.length) {
+        holder.insertAdjacentHTML("beforeend", '<div class="muted" style="padding:12px">Belum ada data untuk chart ini.</div>');
+        continue;
+      }
+      datasets = models.map((m, i) => ({
+        label: shortName(m.model),
+        data: (m.prefill_levels || []).length && sizes.size ? sizesChain(m.prefill_levels, [...sizes]) : [],
+        borderColor: LEADER_COLORS[i % LEADER_COLORS.length],
+        backgroundColor: LEADER_COLORS[i % LEADER_COLORS.length],
+        tension: 0.25,
+        pointRadius: 3,
+      }));
+    } else {
+      labels = models.map((m) => shortName(m.model));
+      const vals = models.map((m) => m.metrics[def.key] ? m.metrics[def.key].value : null);
+      if (vals.every((v) => v == null)) {
+        holder.insertAdjacentHTML("beforeend", '<div class="muted" style="padding:12px">Belum ada data untuk chart ini.</div>');
+        continue;
+      }
+      datasets = [{
+        label: def.label,
+        data: vals,
+        backgroundColor: vals.map((v) => v == null ? "#333" : "rgba(90,140,255,.75)"),
+        borderWidth: 0,
+        borderRadius: 4,
+      }];
+    }
+    new Chart(canvas, {
+      type: def.kind === "line" ? "line" : "bar",
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: def.kind === "line", labels: { color: "#9aa4b2", font: { size: 10 }, boxWidth: 12 } } },
+        scales: {
+          x: { ticks: { color: "#9aa4b2", font: { size: 10 }, maxRotation: 40 } },
+          y: { beginAtZero: true, title: { display: true, text: def.unit, color: "#6b7684", font: { size: 10 } }, ticks: { color: "#9aa4b2", font: { size: 10 } } },
+        },
+      },
+    });
+  }
+}
+
+function sizesChain(levels, sizes) {
+  const map = Object.fromEntries(levels.map((l) => [l.target_tokens, l.prefill_tok_per_s]));
+  return sizes.map((s) => map[s] ?? null);
+}
+
+function shortName(m) {
+  const idx = m.indexOf("/");
+  return idx > 0 ? m.slice(idx + 1) : m;
+}
+
+function renderSpeedScore(models, weights) {
+  const host = $("#speed-score");
+  if (!models.length) {
+    host.innerHTML = '<div class="muted">Belum ada run selesai — jalankan tes/perf/bench dulu untuk mengisi perbandingan.</div>';
+    $("#speed-weights").textContent = "";
+    return;
+  }
+  let html = '<div class="scroll"><table class="tbl"><thead><tr><th>Rank</th><th>Model</th><th>Overall score</th><th>Tok/s fn</th><th>TTFT</th><th>ITL</th><th>Load max</th><th>Prefill max</th><th>Bench tok/s</th><th>Run</th></tr></thead><tbody>';
+  models.forEach((m, i) => {
+    const sc = m.score;
+    const color = sc == null ? "#6b7684" : (sc >= 80 ? "var(--ok)" : sc >= 55 ? "var(--warn)" : "var(--err)");
+    const bar = sc == null ? "" : `<div class="ratebar"><span style="width:${sc}%;background:${color}"></span></div>`;
+    const g = (k) => (m.metrics[k] ? m.metrics[k].value : null);
+    html += `<tr><td>${rankBadge(m.score == null ? null : i + 1)}</td><td class="mono">${esc(m.model)}</td>
+      <td>${bar} ${sc == null ? "—" : sc.toFixed(1)}</td>
+      <td>${fmtNum(g("functional_tok_per_s"))}</td>
+      <td>${fmtMs(g("ttft_ms"))}</td>
+      <td>${g("itl_ms") != null ? fmtNum(g("itl_ms")) + " ms" : "—"}</td>
+      <td>${g("load_throughput_rps") != null ? g("load_throughput_rps") + " rps" : "—"}</td>
+      <td>${fmtNum(g("prefill_tok_per_s"))}</td>
+      <td>${fmtNum(g("bench_tok_per_s"))}</td>
+      <td>${m.run_count}</td></tr>`;
+  });
+  html += "</tbody></table></div>";
+  host.innerHTML = html;
+  $("#speed-weights").textContent = "Bobot skor: " + Object.entries(weights).map(([k, v]) => `${v * 100}% ${k}`).join(" · ");
+}
+
+async function loadSpeed() {
+  $("#speed-score").innerHTML = '<div class="muted">Memuat…</div>';
+  try {
+    const data = await api("/api/speed-comparison");
+    renderSpeedScore(data.models || [], data.weights || {});
+    drawSpeedCharts(data);
+  } catch (e) {
+    $("#speed-score").innerHTML = `<div class="muted">Gagal memuat: ${esc(e.message)}</div>`;
+  }
 }
 
 /* ---------- modal ---------- */

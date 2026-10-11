@@ -22,6 +22,7 @@
   <button data-tab="functional" class="tab active">Tes Fungsional</button>
   <button data-tab="bench" class="tab">Task Benchmark</button>
   <button data-tab="perf" class="tab">Performance</button>
+  <button data-tab="speed" class="tab">Speed Comparison</button>
   <button data-tab="history" class="tab">Riwayat</button>
   <button data-tab="settings" class="tab">Settings</button>
 </nav>
@@ -130,6 +131,44 @@
     </div>
   </section>
 
+  <section id="tab-speed" class="tabpane">
+    <div class="card">
+      <h2>Overall score <span class="muted" style="font-weight:400;font-size:.8rem">(skor 0–100 tertimbang, model dengan data metrik terbanyak + skor terbaik di atas)</span></h2>
+      <div id="speed-score"></div>
+      <p class="hint" id="speed-weights"></p>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h2>Tok/s — tes fungsional (streaming)</h2>
+        <div class="chartbox"><canvas id="chart-fn-tokps"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>TTFT streaming — p50 &amp; p95 (ms)</h2>
+        <div class="chartbox"><canvas id="chart-ttft"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>ITL — inter-token latency (ms/token)</h2>
+        <div class="chartbox"><canvas id="chart-itl"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>Throughput load probe (req/s)</h2>
+        <div class="chartbox"><canvas id="chart-load"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>Prefill tok/s vs ukuran context</h2>
+        <div class="chartbox"><canvas id="chart-prefill"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>Tok/s generation — benchmark coding-agent</h2>
+        <div class="chartbox"><canvas id="chart-bench"></canvas></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Tabel perbandingan</h2>
+      <div id="speed-table"></div>
+    </div>
+  </section>
+
   <section id="tab-history" class="tabpane">
     <div class="card">
       <h2>Riwayat run</h2>
@@ -190,6 +229,7 @@
 </div>
 <div id="toast" class="toast hidden"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
