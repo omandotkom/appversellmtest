@@ -216,8 +216,20 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 .hidden { display: none !important; }
 .spark { display: inline-block; vertical-align: middle; margin-left: 6px; }
 
-/* speed comparison charts */
+/* comparison charts */
 .chartbox { position: relative; height: 240px; }
+
+/* provider picker group heading */
+.picker-group {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 8px 8px 4px; margin-top: 4px;
+  font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.picker-group:first-child { margin-top: 0; }
+.nowrap { white-space: nowrap; }
+.nowrap .btn { margin: 1px 0; }
 
 
 /* rank badges (1=emas, 2=perak, 3=perunggu, sisanya netral) */

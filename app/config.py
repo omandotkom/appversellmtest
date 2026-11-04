@@ -1,4 +1,8 @@
-"""Runtime configuration sourced from .env at the project root."""
+"""Runtime configuration sourced from .env at the project root.
+
+Provider credentials live in SQLite (see ``app.catalog``); this module only
+holds global runtime settings shared by every provider.
+"""
 from __future__ import annotations
 
 import threading
@@ -7,10 +11,16 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = BASE_DIR / ".env"
 
+DEFAULT_WEIGHTS = {
+    "functional_tok_per_s": 0.30,
+    "ttft_ms": 0.20,
+    "pass_rate": 0.20,
+    "itl_ms": 0.10,
+    "avg_latency_ms": 0.10,
+    "cost_usd": 0.10,
+}
+
 DEFAULTS: dict[str, str] = {
-    "GATEWAY_URL": "http://localhost:4000",
-    "GATEWAY_ADMIN_KEY": "",
-    "GATEWAY_TEST_KEY": "",
     "HOST": "127.0.0.1",
     "PORT": "8000",
     "DB_PATH": "data/health.db",
@@ -22,9 +32,24 @@ DEFAULTS: dict[str, str] = {
     "LOAD_REQUESTS_PER_LEVEL": "8",
     "CONTEXT_SIZES": "1000,8000,32000",
     "REGRESSION_THRESHOLD_PCT": "25",
+    "COMPARISON_WINDOW": "5",
+    "COMPARISON_REPEAT": "3",
+    "SCORE_W_TOKPS": "0.30",
+    "SCORE_W_TTFT": "0.20",
+    "SCORE_W_PASS": "0.20",
+    "SCORE_W_ITL": "0.10",
+    "SCORE_W_LATENCY": "0.10",
+    "SCORE_W_COST": "0.10",
 }
 
-SECRET_KEYS = ("GATEWAY_ADMIN_KEY", "GATEWAY_TEST_KEY")
+_WEIGHT_KEYS = {
+    "functional_tok_per_s": "SCORE_W_TOKPS",
+    "ttft_ms": "SCORE_W_TTFT",
+    "pass_rate": "SCORE_W_PASS",
+    "itl_ms": "SCORE_W_ITL",
+    "avg_latency_ms": "SCORE_W_LATENCY",
+    "cost_usd": "SCORE_W_COST",
+}
 
 _lock = threading.Lock()
 _env: dict[str, str] = dict(DEFAULTS)
@@ -63,6 +88,13 @@ def get_int(key: str, default: int) -> int:
         return default
 
 
+def get_float(key: str, default: float) -> float:
+    try:
+        return float(get(key, str(default)))
+    except ValueError:
+        return default
+
+
 def get_list(key: str, default: list[int]) -> list[int]:
     """Parse a comma-separated list of integers (e.g. '1,2,4,8')."""
     raw = get(key, "")
@@ -74,6 +106,14 @@ def get_list(key: str, default: list[int]) -> list[int]:
         if part.isdigit():
             values.append(int(part))
     return values or list(default)
+
+
+def get_weights() -> dict[str, float]:
+    weights = {metric: get_float(key, DEFAULT_WEIGHTS[metric])
+               for metric, key in _WEIGHT_KEYS.items()}
+    if sum(weights.values()) <= 0:
+        return dict(DEFAULT_WEIGHTS)
+    return weights
 
 
 def set_values(updates: dict[str, str]) -> None:
