@@ -4,11 +4,11 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
-import httpx
-
-from . import db, gateway
+from . import db
+from .providers import build_provider
+from .targets import Target
 
 OK_PROMPT = "Reply with exactly: OK"
 CHARS_PER_TOKEN = 4
@@ -52,26 +52,23 @@ def _filler(target_tokens: int) -> str:
     return " ".join(words)
 
 
-async def _raw_request(client: httpx.AsyncClient, payload: dict, timeout_s: float) -> dict:
-    """A single request with NO retry: rate limits (429) must be observed, not hidden."""
-    started = time.perf_counter()
-    try:
-        response = await client.post(
-            "/v1/chat/completions",
-            json=payload,
-            headers=gateway.test_headers(),
-            timeout=gateway.timeout(timeout_s),
-        )
-        return {"status": response.status_code, "latency_ms": int((time.perf_counter() - started) * 1000)}
-    except httpx.HTTPError as exc:
-        return {"status": 0, "latency_ms": int((time.perf_counter() - started) * 1000),
-                "error": f"{type(exc).__name__}"}
+async def _raw_request(provider, model: str, timeout_s: float) -> dict:
+    """A single request with NO retry: rate limits (429) must be observed."""
+    result = await provider.complete(
+        model, [{"role": "user", "content": OK_PROMPT}],
+        max_tokens=16, temperature=0, timeout_s=timeout_s,
+    )
+    return {
+        "status": result.status_code or 0,
+        "latency_ms": result.latency_ms or 0,
+        "error": result.error,
+    }
 
 
 def _finalize_load(levels: list[dict]) -> dict:
-    total_requests = sum(int(l["requests"]) for l in levels)
-    total_429 = sum(int(l["http_429"]) for l in levels)
-    throughputs = [l["throughput_rps"] for l in levels if l.get("throughput_rps") is not None]
+    total_requests = sum(int(level["requests"]) for level in levels)
+    total_429 = sum(int(level["http_429"]) for level in levels)
+    throughputs = [level["throughput_rps"] for level in levels if level.get("throughput_rps") is not None]
     return {
         "levels": levels,
         "total_requests": total_requests,
@@ -80,103 +77,104 @@ def _finalize_load(levels: list[dict]) -> dict:
     }
 
 
-async def run_load(run_id: int, opts: dict, abort: asyncio.Event, metas: dict[str, dict]) -> None:
-    """Models run sequentially so throughput measurements don't interfere."""
+async def run_load(run_id: int, opts: dict, abort: asyncio.Event, targets: list[Target]) -> None:
+    """Targets run sequentially so throughput measurements don't interfere."""
     levels: list[int] = opts["levels"]
     requests_per_level: int = opts["requests_per_level"]
     timeout_s: float = opts["timeout_s"]
 
-    for row in db.get_run_models(run_id):
-        if abort.is_set():
-            db.update_run_model(row["id"], status="skipped", outcome="aborted", finished_at=_now())
+    for target in targets:
+        rm_id = target.run_model_id
+        if rm_id is None:
             continue
-        db.update_run_model(row["id"], status="running", started_at=_now())
-        model = row["model"]
+        if abort.is_set():
+            db.update_run_model(rm_id, status="skipped", outcome="aborted", finished_at=_now())
+            continue
+        db.update_run_model(rm_id, status="running", started_at=_now())
+        model = target.model_name
         level_results: list[dict] = []
-        async with httpx.AsyncClient(base_url=gateway.base_url()) as client:
+        provider = build_provider(target.provider)
+        try:
             for level in levels:
                 if abort.is_set():
                     break
-                payload = gateway.chat_payload(
-                    model=model, messages=[{"role": "user", "content": OK_PROMPT}],
-                    max_tokens=16, temperature=0,
-                )
                 per_worker = [requests_per_level // level] * level
-                for i in range(requests_per_level % level):
-                    per_worker[i] += 1
+                for index in range(requests_per_level % level):
+                    per_worker[index] += 1
                 wall_start = time.perf_counter()
 
                 async def worker(count: int) -> list[dict]:
-                    return [await _raw_request(client, payload, timeout_s) for _ in range(count)]
+                    return [await _raw_request(provider, model, timeout_s) for _ in range(count)]
 
-                batches = await asyncio.gather(*(worker(per_worker[i]) for i in range(level)))
+                batches = await asyncio.gather(*(worker(per_worker[index]) for index in range(level)))
                 wall_ms = int((time.perf_counter() - wall_start) * 1000)
-                samples = [s for batch in batches for s in batch]
-                success = sum(1 for s in samples if s["status"] == 200)
-                http_429 = sum(1 for s in samples if s["status"] == 429)
+                samples = [sample for batch in batches for sample in batch]
+                success = sum(1 for sample in samples if sample["status"] == 200)
+                http_429 = sum(1 for sample in samples if sample["status"] == 429)
                 errors = len(samples) - success - http_429
-                lats = sorted(s["latency_ms"] for s in samples if s["status"] == 200)
+                latencies = sorted(sample["latency_ms"] for sample in samples if sample["status"] == 200)
                 level_results.append({
                     "concurrency": level,
                     "requests": len(samples),
                     "success": success,
                     "http_429": http_429,
                     "errors": errors,
-                    "p50_ms": _percentile(lats, 50),
-                    "p95_ms": _percentile(lats, 95),
+                    "p50_ms": _percentile(latencies, 50),
+                    "p95_ms": _percentile(latencies, 95),
                     "throughput_rps": round(success / (wall_ms / 1000.0), 2) if wall_ms else None,
                     "wall_ms": wall_ms,
                 })
-                db.update_run_model(row["id"], metrics={"levels": level_results})
-        db.update_run_model(row["id"], status="done", metrics=_finalize_load(level_results),
+                db.update_run_model(rm_id, metrics={"levels": level_results})
+        finally:
+            await provider.aclose()
+        db.update_run_model(rm_id, status="done", metrics=_finalize_load(level_results),
                             finished_at=_now())
 
 
 def _finalize_context(levels: list[dict]) -> dict:
-    ttf = [l["ttft_ms"] for l in levels if l.get("ttft_ms") is not None]
-    prefill = [l["prefill_tok_per_s"] for l in levels if l.get("prefill_tok_per_s") is not None]
+    ttfts = [level["ttft_ms"] for level in levels if level.get("ttft_ms") is not None]
+    prefill = [level["prefill_tok_per_s"] for level in levels if level.get("prefill_tok_per_s") is not None]
     return {
         "levels": levels,
-        "max_ttft_ms": max(ttf) if ttf else None,
+        "max_ttft_ms": max(ttfts) if ttfts else None,
         "max_prefill_tok_per_s": round(max(prefill)) if prefill else None,
     }
 
 
-async def run_context(run_id: int, opts: dict, abort: asyncio.Event, metas: dict[str, dict]) -> None:
+async def run_context(run_id: int, opts: dict, abort: asyncio.Event, targets: list[Target]) -> None:
     sizes: list[int] = opts["sizes"]
     timeout_s: float = opts["timeout_s"]
 
-    for row in db.get_run_models(run_id):
-        if abort.is_set():
-            db.update_run_model(row["id"], status="skipped", outcome="aborted", finished_at=_now())
+    for target in targets:
+        rm_id = target.run_model_id
+        if rm_id is None:
             continue
-        db.update_run_model(row["id"], status="running", started_at=_now())
-        model = row["model"]
+        if abort.is_set():
+            db.update_run_model(rm_id, status="skipped", outcome="aborted", finished_at=_now())
+            continue
+        db.update_run_model(rm_id, status="running", started_at=_now())
+        model = target.model_name
         level_results: list[dict] = []
-        async with httpx.AsyncClient(base_url=gateway.base_url()) as client:
+        provider = build_provider(target.provider)
+        try:
             for size in sizes:
                 if abort.is_set():
                     break
                 prompt = _filler(size) + "\n\nReply with exactly: OK"
-                payload = gateway.chat_payload(
-                    model=model, messages=[{"role": "user", "content": prompt}],
-                    max_tokens=16, temperature=0, stream=True,
-                    stream_options={"include_usage": True},
+                result = await provider.complete(
+                    model, [{"role": "user", "content": prompt}],
+                    max_tokens=16, temperature=0, stream=True, timeout_s=timeout_s,
                 )
-                started = time.perf_counter()
-                obs = await gateway.stream_chat(client, payload, timeout_s)
-                latency = int((time.perf_counter() - started) * 1000)
-                tokens_in = int((obs["usage"] or {}).get("prompt_tokens") or 0)
-                ttft = obs["ttft_ms"]
-                if obs["status_code"] == 200:
-                    status = "pass"
-                    error = None
-                elif obs["status_code"] == 400 and "context" in (obs["text"] or "").lower():
-                    status = "context_exceeded"
-                    error = obs["text"]
+                latency = result.latency_ms or 0
+                tokens_in = int((result.usage or {}).get("prompt_tokens") or 0)
+                ttft = result.ttft_ms
+                text = (result.text or "").lower()
+                if result.status_code == 200:
+                    status, error = "pass", None
+                elif result.status_code == 400 and "context" in text:
+                    status, error = "context_exceeded", result.text
                 else:
-                    status = "error"
-                    error = obs["text"] or obs["error"]
+                    status, error = "error", result.text or result.error
                 prefill = (tokens_in / (ttft / 1000.0)) if ttft and tokens_in else None
                 level_results.append({
                     "target_tokens": size,
@@ -187,6 +185,8 @@ async def run_context(run_id: int, opts: dict, abort: asyncio.Event, metas: dict
                     "status": status,
                     "error": error,
                 })
-                db.update_run_model(row["id"], metrics={"levels": level_results})
-        db.update_run_model(row["id"], status="done", metrics=_finalize_context(level_results),
+                db.update_run_model(rm_id, metrics={"levels": level_results})
+        finally:
+            await provider.aclose()
+        db.update_run_model(rm_id, status="done", metrics=_finalize_context(level_results),
                             finished_at=_now())

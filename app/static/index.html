@@ -10,28 +10,41 @@
 <header class="topbar">
   <div class="brand">
     <strong>Gateway Model Lab</strong>
-    <span class="sub">monitoring &amp; benchmark model</span>
+    <span class="sub">katalog multi-provider · monitoring &amp; benchmark</span>
   </div>
   <div class="right">
     <span id="gw-pill" class="pill muted">memuat…</span>
-    <button id="refresh-models" class="btn ghost">Refresh model</button>
+    <button id="refresh-models" class="btn ghost">Muat ulang katalog</button>
   </div>
 </header>
 
 <nav class="tabs">
+  <button data-tab="providers" class="tab">Providers</button>
   <button data-tab="functional" class="tab active">Tes Fungsional</button>
   <button data-tab="bench" class="tab">Task Benchmark</button>
   <button data-tab="perf" class="tab">Performance</button>
-  <button data-tab="speed" class="tab">Speed Comparison</button>
+  <button data-tab="comparison" class="tab">Comparison</button>
   <button data-tab="history" class="tab">Riwayat</button>
   <button data-tab="settings" class="tab">Settings</button>
 </nav>
 
 <main>
+  <section id="tab-providers" class="tabpane">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;align-items:center;margin-top:0">
+        <h2 style="margin:0">Provider &amp; model</h2>
+        <button id="provider-add" class="btn primary">Tambah provider</button>
+      </div>
+      <p class="hint">Setiap provider punya endpoint sendiri. Model selalu diidentifikasi sebagai
+        <code>provider + model</code>. API key disimpan di SQLite dan tidak pernah dikirim kembali ke browser.</p>
+      <div id="provider-list"></div>
+    </div>
+  </section>
+
   <section id="tab-functional" class="tabpane active">
     <div class="grid2">
       <div class="card">
-        <h2>Pilih model</h2>
+        <h2>Pilih target</h2>
         <div id="fn-picker" class="picker"></div>
       </div>
       <div class="card">
@@ -51,7 +64,7 @@
           </select>
         </label>
         <label class="switch"><input type="checkbox" id="fn-warmup" checked> Warmup (buang request pertama)</label>
-        <p class="hint">Jika tidak ada model dipilih, semua model chat akan diuji.</p>
+        <p class="hint">Jika tidak ada target dipilih, semua model chat dari provider aktif akan diuji.</p>
         <button id="fn-start" class="btn primary">Mulai tes</button>
       </div>
     </div>
@@ -66,7 +79,7 @@
   <section id="tab-bench" class="tabpane">
     <div class="grid2">
       <div class="card">
-        <h2>Pilih model</h2>
+        <h2>Pilih target</h2>
         <div id="bench-picker" class="picker"></div>
       </div>
       <div class="card">
@@ -95,7 +108,7 @@
   <section id="tab-perf" class="tabpane">
     <div class="grid2">
       <div class="card">
-        <h2>Pilih model</h2>
+        <h2>Pilih target</h2>
         <div id="perf-picker" class="picker"></div>
       </div>
       <div class="card">
@@ -131,41 +144,90 @@
     </div>
   </section>
 
-  <section id="tab-speed" class="tabpane">
-    <div class="card">
-      <h2>Overall score <span class="muted" style="font-weight:400;font-size:.8rem">(skor 0–100 tertimbang, model dengan data metrik terbanyak + skor terbaik di atas)</span></h2>
-      <div id="speed-score"></div>
-      <p class="hint" id="speed-weights"></p>
-    </div>
+  <section id="tab-comparison" class="tabpane">
     <div class="grid2">
       <div class="card">
-        <h2>Tok/s — tes fungsional (streaming)</h2>
+        <h2>Target perbandingan</h2>
+        <div id="cmp-picker" class="picker"></div>
+        <p class="hint">Kosongkan pilihan untuk membandingkan semua model chat aktif.</p>
+      </div>
+      <div class="card">
+        <h2>Jalankan atau muat hasil</h2>
+        <label class="field">Run fungsional
+          <select id="cmp-run"></select>
+        </label>
+        <div class="grid2" style="margin-bottom:0">
+          <label class="field">Mode histori
+            <select id="cmp-mode">
+              <option value="latest">Terbaru</option>
+              <option value="median">Median N run</option>
+            </select>
+          </label>
+          <label class="field">Window
+            <input type="number" id="cmp-window" value="5" min="1" max="20">
+          </label>
+        </div>
+        <div class="grid2" style="margin-bottom:0">
+          <label class="field">Top N
+            <input type="number" id="cmp-topn" value="20" min="1" max="100">
+          </label>
+          <label class="field">Repeat comparison
+            <select id="cmp-repeat">
+              <option value="1">1×</option>
+              <option value="3" selected>3×</option>
+              <option value="5">5×</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint">Run comparison selalu memakai 4 cek fungsional + warmup + multi-trial.</p>
+        <div class="row">
+          <button id="cmp-start" class="btn primary">Jalankan comparison</button>
+          <button id="cmp-refresh" class="btn ghost">Muat ulang</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Overall score <span class="muted" style="font-weight:400;font-size:.8rem">(0–100, bobot dapat diubah di Settings)</span></h2>
+      <div id="cmp-score"></div>
+      <p class="hint" id="cmp-weights"></p>
+    </div>
+
+    <div class="card">
+      <h2>Ringkasan provider</h2>
+      <div id="cmp-providers"></div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>Tok/s streaming</h2>
         <div class="chartbox"><canvas id="chart-fn-tokps"></canvas></div>
       </div>
       <div class="card">
-        <h2>TTFT streaming — p50 &amp; p95 (ms)</h2>
+        <h2>TTFT p50 (ms)</h2>
         <div class="chartbox"><canvas id="chart-ttft"></canvas></div>
       </div>
       <div class="card">
-        <h2>ITL — inter-token latency (ms/token)</h2>
+        <h2>ITL (ms/token)</h2>
         <div class="chartbox"><canvas id="chart-itl"></canvas></div>
       </div>
       <div class="card">
-        <h2>Throughput load probe (req/s)</h2>
-        <div class="chartbox"><canvas id="chart-load"></canvas></div>
+        <h2>Rata-rata latency (ms)</h2>
+        <div class="chartbox"><canvas id="chart-latency"></canvas></div>
       </div>
       <div class="card">
-        <h2>Prefill tok/s vs ukuran context</h2>
-        <div class="chartbox"><canvas id="chart-prefill"></canvas></div>
+        <h2>Pass rate fungsional</h2>
+        <div class="chartbox"><canvas id="chart-pass"></canvas></div>
       </div>
       <div class="card">
-        <h2>Tok/s generation — benchmark coding-agent</h2>
-        <div class="chartbox"><canvas id="chart-bench"></canvas></div>
+        <h2>Biaya per run</h2>
+        <div class="chartbox"><canvas id="chart-cost"></canvas></div>
       </div>
     </div>
+
     <div class="card">
       <h2>Tabel perbandingan</h2>
-      <div id="speed-table"></div>
+      <div id="cmp-table"></div>
     </div>
   </section>
 
@@ -182,17 +244,6 @@
 
   <section id="tab-settings" class="tabpane">
     <div class="card narrow">
-      <h2>Koneksi gateway</h2>
-      <label class="field">Gateway URL
-        <input id="set-url" placeholder="http://localhost:4000">
-      </label>
-      <label class="field">Admin key (opsional)
-        <input id="set-admin-key" type="password" placeholder="••• tersimpan (kosongkan jika tidak mengubah)">
-      </label>
-      <label class="field">Virtual test key
-        <input id="set-test-key" type="password" placeholder="••• tersimpan (kosongkan jika tidak mengubah)">
-      </label>
-
       <h2>Jalankan</h2>
       <div class="grid2">
         <label class="field">Concurrency fungsional
@@ -207,12 +258,58 @@
         <label class="field">Token cap benchmark
           <input type="number" id="set-token-cap" min="1000" step="1000">
         </label>
+        <label class="field">Ambang regresi (%)
+          <input type="number" id="set-regression" min="1" max="100">
+        </label>
+        <label class="field">Comparison repeat default
+          <input type="number" id="set-cmp-repeat" min="1" max="10">
+        </label>
+        <label class="field">Comparison window default
+          <input type="number" id="set-cmp-window" min="1" max="20">
+        </label>
+        <label class="field">HOST
+          <input id="set-host">
+        </label>
+        <label class="field">PORT
+          <input id="set-port">
+        </label>
       </div>
-      <p class="hint">Key disimpan di file <code>.env</code> lokal dan tidak pernah ditampilkan kembali.
-      Kosongkan kolom key jika tidak ingin mengubah nilainya.</p>
+      <div class="grid2">
+        <label class="field">Load levels
+          <input id="set-load-levels">
+        </label>
+        <label class="field">Request per level
+          <input type="number" id="set-load-rpl" min="1">
+        </label>
+        <label class="field">Context sizes
+          <input id="set-context-sizes">
+        </label>
+      </div>
+
+      <h2>Bobot comparison</h2>
+      <div class="grid2">
+        <label class="field">Tok/s
+          <input type="number" id="set-w-tokps" step="0.01" min="0" max="1">
+        </label>
+        <label class="field">TTFT
+          <input type="number" id="set-w-ttft" step="0.01" min="0" max="1">
+        </label>
+        <label class="field">Pass rate
+          <input type="number" id="set-w-pass" step="0.01" min="0" max="1">
+        </label>
+        <label class="field">ITL
+          <input type="number" id="set-w-itl" step="0.01" min="0" max="1">
+        </label>
+        <label class="field">Avg latency
+          <input type="number" id="set-w-latency" step="0.01" min="0" max="1">
+        </label>
+        <label class="field">Biaya
+          <input type="number" id="set-w-cost" step="0.01" min="0" max="1">
+        </label>
+      </div>
+      <p class="hint">API key provider dikelola di tab Providers. Settings ini hanya menyimpan konfigurasi global non-rahasia.</p>
       <div class="row">
         <button id="set-save" class="btn primary">Simpan</button>
-        <button id="set-test" class="btn ghost">Uji koneksi</button>
       </div>
     </div>
   </section>

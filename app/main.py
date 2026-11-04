@@ -4,23 +4,21 @@ from __future__ import annotations
 import asyncio
 import re
 import statistics
-import time
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-import httpx
 import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, gateway, perf, runner, speed
+from . import catalog, comparison, config, db, perf, runner, targets
 from .agent import loop as agent_loop
 
-# The metric used for per-model regression/trend detection, per run kind.
+# The metric used for per-target regression/trend detection, per run kind.
 KIND_METRIC = {
     "functional": "avg_latency_ms",
     "bench": "error_rate",
@@ -29,6 +27,14 @@ KIND_METRIC = {
 }
 # Kinds where a HIGHER metric is worse (latency, error rate).
 KIND_WORSE_WHEN_UP = {"functional", "bench"}
+
+GLOBAL_SETTING_KEYS = (
+    "HOST", "PORT", "FUNCTIONAL_CONCURRENCY", "BENCH_CONCURRENCY",
+    "DEFAULT_TIMEOUT_S", "BENCH_TOKEN_CAP", "LOAD_LEVELS",
+    "LOAD_REQUESTS_PER_LEVEL", "CONTEXT_SIZES", "REGRESSION_THRESHOLD_PCT",
+    "COMPARISON_WINDOW", "COMPARISON_REPEAT", "SCORE_W_TOKPS", "SCORE_W_TTFT",
+    "SCORE_W_PASS", "SCORE_W_ITL", "SCORE_W_LATENCY", "SCORE_W_COST",
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 TASKS_DIR = Path(__file__).resolve().parent / "tasks"
@@ -46,7 +52,6 @@ app = FastAPI(title="Gateway Model Lab", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 ACTIVE_RUNS: dict[int, dict] = {}
-MODELS_CACHE: dict[str, Any] = {"ts": 0.0, "models": [], "error": None}
 
 
 def _now() -> str:
@@ -73,80 +78,174 @@ def favicon() -> Response:
 
 @app.get("/api/status")
 def api_status() -> dict:
+    providers = db.list_providers()
+    enabled = [provider for provider in providers if provider["enabled"]]
     return {
-        "gateway_url": gateway.configured_url(),
-        "admin_key_set": bool(config.get("GATEWAY_ADMIN_KEY")),
-        "test_key_set": bool(config.get("GATEWAY_TEST_KEY")),
-        "models_cached": len(MODELS_CACHE["models"]),
+        "providers": len(providers),
+        "providers_enabled": len(enabled),
+        "models": db.count_enabled_models(),
+        "configured": bool(enabled),
+        "comparison_window": config.get_int("COMPARISON_WINDOW", 5),
+        "comparison_repeat": config.get_int("COMPARISON_REPEAT", 3),
     }
 
 
 @app.get("/api/settings")
 def get_settings() -> dict:
-    return {
-        "GATEWAY_URL": config.get("GATEWAY_URL"),
-        "HOST": config.get("HOST"),
-        "PORT": config.get("PORT"),
-        "FUNCTIONAL_CONCURRENCY": config.get("FUNCTIONAL_CONCURRENCY"),
-        "BENCH_CONCURRENCY": config.get("BENCH_CONCURRENCY"),
-        "DEFAULT_TIMEOUT_S": config.get("DEFAULT_TIMEOUT_S"),
-        "BENCH_TOKEN_CAP": config.get("BENCH_TOKEN_CAP"),
-        "admin_key_set": bool(config.get("GATEWAY_ADMIN_KEY")),
-        "test_key_set": bool(config.get("GATEWAY_TEST_KEY")),
-    }
+    out = {key: config.get(key) for key in GLOBAL_SETTING_KEYS}
+    out["score_weights"] = config.get_weights()
+    return out
 
 
 @app.post("/api/settings")
 async def save_settings(body: dict) -> dict:
     updates: dict[str, str] = {}
-    for key in ("GATEWAY_URL", "HOST", "PORT", "FUNCTIONAL_CONCURRENCY",
-                "BENCH_CONCURRENCY", "DEFAULT_TIMEOUT_S", "BENCH_TOKEN_CAP"):
+    for key in GLOBAL_SETTING_KEYS:
         if body.get(key) not in (None, ""):
             updates[key] = str(body[key]).strip()
-    if body.get("GATEWAY_ADMIN_KEY"):
-        updates["GATEWAY_ADMIN_KEY"] = str(body["GATEWAY_ADMIN_KEY"]).strip()
-    if body.get("GATEWAY_TEST_KEY"):
-        updates["GATEWAY_TEST_KEY"] = str(body["GATEWAY_TEST_KEY"]).strip()
     config.set_values(updates)
-    MODELS_CACHE["models"] = []
-    MODELS_CACHE["ts"] = 0.0
     return {"ok": True}
 
 
-# --- models ----------------------------------------------------------------
+# --- providers -------------------------------------------------------------
 
-async def _refresh_models() -> list[dict]:
+def _provider_or_404(provider_id: int) -> dict:
+    row = db.get_provider(provider_id)
+    if not row:
+        raise HTTPException(404, "Provider tidak ditemukan")
+    return row
+
+
+@app.get("/api/providers")
+def list_providers() -> dict:
+    return {"providers": catalog.list_providers()}
+
+
+@app.post("/api/providers")
+def create_provider(body: dict) -> dict:
     try:
-        models = await gateway.list_models()
-        MODELS_CACHE.update(ts=time.time(), models=models, error=None)
-        return models
-    except gateway.GatewayNotConfigured as exc:
-        MODELS_CACHE["error"] = str(exc)
+        provider_id = catalog.create_provider(body)
+    except ValueError as exc:
         raise HTTPException(400, str(exc))
-    except httpx.HTTPError as exc:
-        MODELS_CACHE["error"] = str(exc)
-        raise HTTPException(502, f"Gagal mengambil daftar model: {exc}")
+    return {"provider": catalog.get_provider(provider_id)}
 
 
-@app.get("/api/models")
-async def api_models(refresh: int = 0) -> dict:
-    if refresh or not MODELS_CACHE["models"] or time.time() - MODELS_CACHE["ts"] > 300:
-        await _refresh_models()
-    return {"models": MODELS_CACHE["models"], "error": MODELS_CACHE["error"], "fetched_at": MODELS_CACHE["ts"]}
+@app.get("/api/providers/{provider_id}")
+def get_provider(provider_id: int) -> dict:
+    _provider_or_404(provider_id)
+    return {"provider": catalog.get_provider(provider_id)}
 
 
-async def _resolve_models(names: Optional[list], include_blocked: bool) -> list[str]:
+@app.patch("/api/providers/{provider_id}")
+def update_provider(provider_id: int, body: dict) -> dict:
+    _provider_or_404(provider_id)
     try:
-        models = await _refresh_models()
-    except HTTPException:
-        models = MODELS_CACHE["models"]
-        if not models:
-            raise
-    if names:
-        known = {m["name"] for m in models}
-        return [n for n in names if n in known]
-    return [m["name"] for m in models
-            if gateway.is_chat_candidate(m) and (include_blocked or not m.get("blocked"))]
+        catalog.update_provider(provider_id, body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"provider": catalog.get_provider(provider_id)}
+
+
+@app.delete("/api/providers/{provider_id}")
+def delete_provider(provider_id: int) -> dict:
+    _provider_or_404(provider_id)
+    db.set_provider_enabled(provider_id, False)
+    return {"ok": True, "provider": catalog.get_provider(provider_id)}
+
+
+@app.put("/api/providers/{provider_id}/secrets")
+def update_provider_secrets(provider_id: int, body: dict) -> dict:
+    _provider_or_404(provider_id)
+    try:
+        catalog.set_secrets(provider_id, body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    row = db.get_provider(provider_id)
+    return {
+        "ok": True,
+        "has_api_key": bool(row.get("api_key")),
+        "has_admin_key": bool(row.get("admin_key")),
+    }
+
+
+@app.post("/api/providers/{provider_id}/test")
+async def test_provider(provider_id: int) -> dict:
+    _provider_or_404(provider_id)
+    return await catalog.test_provider(provider_id)
+
+
+@app.post("/api/providers/{provider_id}/refresh-models")
+async def refresh_provider_models(provider_id: int) -> dict:
+    _provider_or_404(provider_id)
+    try:
+        return await catalog.refresh_models(provider_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001 - network/provider failure
+        raise HTTPException(502, f"Gagal mengambil model: {type(exc).__name__}: {exc}")
+
+
+@app.get("/api/providers/{provider_id}/models")
+def provider_models(provider_id: int) -> dict:
+    _provider_or_404(provider_id)
+    return {"models": db.get_provider_models(provider_id)}
+
+
+@app.patch("/api/provider-models/{model_id}")
+def update_provider_model(model_id: int, body: dict) -> dict:
+    row = db.get_provider_model(model_id)
+    if not row:
+        raise HTTPException(404, "Model tidak ditemukan")
+    allowed = {"display_name", "enabled", "mode", "blocked", "supports_tools",
+               "supports_json", "context_window", "input_cost_per_token",
+               "output_cost_per_token"}
+    fields = {key: body[key] for key in body if key in allowed}
+    db.update_provider_model(model_id, **fields)
+    return {"model": db.get_provider_model(model_id)}
+
+
+@app.get("/api/catalog")
+def api_catalog() -> dict:
+    return catalog.catalog()
+
+
+# --- targets ---------------------------------------------------------------
+
+def _prepare_targets(body: dict, *, include_blocked: bool = False) -> list[targets.Target]:
+    try:
+        resolved = targets.resolve_targets(
+            body.get("targets"),
+            body.get("models"),
+            include_blocked=include_blocked,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not resolved:
+        raise HTTPException(400, "Tidak ada model yang dipilih")
+    return resolved
+
+
+def _attach_run_models(run_id: int, resolved: list[targets.Target], *, bench: bool = False) -> list[dict]:
+    snapshots = []
+    for target in resolved:
+        workspace = None
+        if bench:
+            workspace = f"data/bench/{run_id}/p{target.provider_id}/{_safe_name(target.model_name)}"
+        target.run_model_id = db.create_run_model(
+            run_id,
+            target.provider_id,
+            target.provider_name,
+            target.model_name,
+            workspace=workspace,
+        )
+        snapshots.append(target.as_dict())
+    return snapshots
+
+
+def _run_options(resolved: list[targets.Target], **extra: Any) -> dict:
+    options = {key: value for key, value in extra.items() if value is not None}
+    options["targets"] = [target.as_dict() for target in resolved]
+    return options
 
 
 # --- tasks -----------------------------------------------------------------
@@ -186,29 +285,50 @@ def api_tasks() -> dict:
 
 @app.post("/api/runs/functional")
 async def start_functional(body: dict) -> dict:
-    checks = [c for c in (body.get("checks") or ["basic", "streaming", "tools", "json"]) if c in runner.CHECK_NAMES]
+    checks = [c for c in (body.get("checks") or list(runner.CHECK_NAMES))
+              if c in runner.CHECK_NAMES]
     if not checks:
         raise HTTPException(400, "Pilih minimal satu jenis tes")
     include_blocked = bool(body.get("include_blocked"))
-    models = await _resolve_models(body.get("models"), include_blocked)
-    if not models:
-        raise HTTPException(400, "Tidak ada model yang dipilih")
-    opts = {
-        "checks": checks,
-        "include_blocked": include_blocked,
-        "concurrency": config.get_int("FUNCTIONAL_CONCURRENCY", 4),
-        "timeout_s": config.get_int("DEFAULT_TIMEOUT_S", 60),
-        "repeat": max(1, int(body.get("repeat") or 1)),
-        "warmup": bool(body.get("warmup", True)),
-    }
+    resolved = _prepare_targets(body, include_blocked=include_blocked)
+    opts = _run_options(
+        resolved,
+        checks=checks,
+        include_blocked=include_blocked,
+        concurrency=config.get_int("FUNCTIONAL_CONCURRENCY", 4),
+        timeout_s=config.get_int("DEFAULT_TIMEOUT_S", 60),
+        repeat=max(1, int(body.get("repeat") or 1)),
+        warmup=bool(body.get("warmup", True)),
+    )
     run_id = db.create_run("functional", opts)
-    for model in models:
-        db.create_run_model(run_id, model)
-    metas = {m["name"]: m for m in MODELS_CACHE["models"]}
+    snapshots = _attach_run_models(run_id, resolved)
     abort = asyncio.Event()
-    task = asyncio.create_task(_run_functional(run_id, checks, opts, abort, metas))
+    task = asyncio.create_task(_run_functional(run_id, checks, opts, abort, resolved))
     ACTIVE_RUNS[run_id] = {"abort": abort, "task": task, "kind": "functional"}
-    return {"run_id": run_id, "models": models}
+    return {"run_id": run_id, "models": [s["model"] for s in snapshots], "targets": snapshots}
+
+
+@app.post("/api/runs/comparison")
+async def start_comparison(body: dict) -> dict:
+    """Full functional run (4 checks, repeat, warmup) tailored for comparison."""
+    resolved = _prepare_targets(body, include_blocked=bool(body.get("include_blocked")))
+    repeat = max(1, int(body.get("repeat") or config.get_int("COMPARISON_REPEAT", 3)))
+    opts = _run_options(
+        resolved,
+        checks=list(runner.CHECK_NAMES),
+        include_blocked=bool(body.get("include_blocked")),
+        concurrency=config.get_int("FUNCTIONAL_CONCURRENCY", 4),
+        timeout_s=config.get_int("DEFAULT_TIMEOUT_S", 60),
+        repeat=repeat,
+        warmup=True,
+        comparison=True,
+    )
+    run_id = db.create_run("functional", opts)
+    snapshots = _attach_run_models(run_id, resolved)
+    abort = asyncio.Event()
+    task = asyncio.create_task(_run_functional(run_id, list(runner.CHECK_NAMES), opts, abort, resolved))
+    ACTIVE_RUNS[run_id] = {"abort": abort, "task": task, "kind": "functional"}
+    return {"run_id": run_id, "models": [s["model"] for s in snapshots], "targets": snapshots}
 
 
 @app.post("/api/runs/bench")
@@ -217,70 +337,67 @@ async def start_bench(body: dict) -> dict:
     if not task_id:
         raise HTTPException(400, "task_id wajib diisi")
     task = _load_task(task_id)
-    models = await _resolve_models(body.get("models"), include_blocked=False)
-    if not models:
-        raise HTTPException(400, "Tidak ada model yang dipilih")
-    opts = {
-        "task_id": task_id,
-        "max_turns": int(body.get("max_turns") or task.get("max_turns") or 30),
-        "token_cap": int(body.get("token_cap") or config.get_int("BENCH_TOKEN_CAP", 150000)),
-        "timeout_s": config.get_int("DEFAULT_TIMEOUT_S", 60),
-        "concurrency": config.get_int("BENCH_CONCURRENCY", 2),
-        "stream_turns": bool(body.get("stream_turns", True)),
-    }
+    resolved = _prepare_targets(body, include_blocked=False)
+    opts = _run_options(
+        resolved,
+        task_id=task_id,
+        max_turns=int(body.get("max_turns") or task.get("max_turns") or 30),
+        token_cap=int(body.get("token_cap") or config.get_int("BENCH_TOKEN_CAP", 150000)),
+        timeout_s=config.get_int("DEFAULT_TIMEOUT_S", 60),
+        concurrency=config.get_int("BENCH_CONCURRENCY", 2),
+        stream_turns=bool(body.get("stream_turns", True)),
+    )
     run_id = db.create_run("bench", opts)
-    for model in models:
-        db.create_run_model(run_id, model, workspace=f"data/bench/{run_id}/{_safe_name(model)}")
-    metas = {m["name"]: m for m in MODELS_CACHE["models"]}
+    snapshots = _attach_run_models(run_id, resolved, bench=True)
     abort = asyncio.Event()
-    task_obj = asyncio.create_task(_run_bench(run_id, task, opts, abort, metas))
+    task_obj = asyncio.create_task(_run_bench(run_id, task, opts, abort, resolved))
     ACTIVE_RUNS[run_id] = {"abort": abort, "task": task_obj, "kind": "bench"}
-    return {"run_id": run_id, "models": models}
+    return {"run_id": run_id, "models": [s["model"] for s in snapshots], "targets": snapshots}
 
 
 @app.post("/api/runs/load")
 async def start_load(body: dict) -> dict:
-    models = await _resolve_models(body.get("models"), include_blocked=False)
-    if not models:
-        raise HTTPException(400, "Tidak ada model yang dipilih")
-    levels = [int(x) for x in (body.get("levels") or []) if str(x).isdigit()] or config.get_list("LOAD_LEVELS", [1, 2, 4, 8])
-    requests_per_level = int(body.get("requests_per_level") or config.get_int("LOAD_REQUESTS_PER_LEVEL", 8))
-    opts = {
-        "levels": levels,
-        "requests_per_level": requests_per_level,
-        "timeout_s": config.get_int("DEFAULT_TIMEOUT_S", 60),
-    }
+    resolved = _prepare_targets(body, include_blocked=False)
+    levels = [int(x) for x in (body.get("levels") or []) if str(x).isdigit()] \
+        or config.get_list("LOAD_LEVELS", [1, 2, 4, 8])
+    requests_per_level = int(body.get("requests_per_level")
+                             or config.get_int("LOAD_REQUESTS_PER_LEVEL", 8))
+    opts = _run_options(
+        resolved,
+        levels=levels,
+        requests_per_level=requests_per_level,
+        timeout_s=config.get_int("DEFAULT_TIMEOUT_S", 60),
+    )
     run_id = db.create_run("load", opts)
-    for model in models:
-        db.create_run_model(run_id, model)
+    snapshots = _attach_run_models(run_id, resolved)
     abort = asyncio.Event()
-    task = asyncio.create_task(_run_load(run_id, opts, abort))
+    task = asyncio.create_task(_run_load(run_id, opts, abort, resolved))
     ACTIVE_RUNS[run_id] = {"abort": abort, "task": task, "kind": "load"}
-    return {"run_id": run_id, "models": models}
+    return {"run_id": run_id, "models": [s["model"] for s in snapshots], "targets": snapshots}
 
 
 @app.post("/api/runs/context")
 async def start_context(body: dict) -> dict:
-    models = await _resolve_models(body.get("models"), include_blocked=False)
-    if not models:
-        raise HTTPException(400, "Tidak ada model yang dipilih")
-    sizes = [int(x) for x in (body.get("sizes") or []) if str(x).isdigit()] or config.get_list("CONTEXT_SIZES", [1000, 8000, 32000])
-    opts = {
-        "sizes": sizes,
-        "timeout_s": config.get_int("DEFAULT_TIMEOUT_S", 60),
-    }
+    resolved = _prepare_targets(body, include_blocked=False)
+    sizes = [int(x) for x in (body.get("sizes") or []) if str(x).isdigit()] \
+        or config.get_list("CONTEXT_SIZES", [1000, 8000, 32000])
+    opts = _run_options(
+        resolved,
+        sizes=sizes,
+        timeout_s=config.get_int("DEFAULT_TIMEOUT_S", 60),
+    )
     run_id = db.create_run("context", opts)
-    for model in models:
-        db.create_run_model(run_id, model)
+    snapshots = _attach_run_models(run_id, resolved)
     abort = asyncio.Event()
-    task = asyncio.create_task(_run_context(run_id, opts, abort))
+    task = asyncio.create_task(_run_context(run_id, opts, abort, resolved))
     ACTIVE_RUNS[run_id] = {"abort": abort, "task": task, "kind": "context"}
-    return {"run_id": run_id, "models": models}
+    return {"run_id": run_id, "models": [s["model"] for s in snapshots], "targets": snapshots}
 
 
-async def _run_load(run_id: int, opts: dict, abort: asyncio.Event) -> None:
+async def _run_load(run_id: int, opts: dict, abort: asyncio.Event,
+                    resolved: list[targets.Target]) -> None:
     try:
-        await perf.run_load(run_id, opts, abort, {})
+        await perf.run_load(run_id, opts, abort, resolved)
         _finalize_run(run_id, "load", abort)
     except Exception as exc:  # noqa: BLE001
         db.finish_run(run_id, "error", {"error": f"{type(exc).__name__}: {exc}"})
@@ -288,9 +405,10 @@ async def _run_load(run_id: int, opts: dict, abort: asyncio.Event) -> None:
         ACTIVE_RUNS.pop(run_id, None)
 
 
-async def _run_context(run_id: int, opts: dict, abort: asyncio.Event) -> None:
+async def _run_context(run_id: int, opts: dict, abort: asyncio.Event,
+                       resolved: list[targets.Target]) -> None:
     try:
-        await perf.run_context(run_id, opts, abort, {})
+        await perf.run_context(run_id, opts, abort, resolved)
         _finalize_run(run_id, "context", abort)
     except Exception as exc:  # noqa: BLE001
         db.finish_run(run_id, "error", {"error": f"{type(exc).__name__}: {exc}"})
@@ -311,9 +429,10 @@ def _summarize_counts(run_id: int, kind: str) -> dict:
     return {"counts": dict(counts), "models": len(rows), "cost_usd": None}
 
 
-async def _run_functional(run_id: int, checks: list[str], opts: dict, abort: asyncio.Event, metas: dict) -> None:
+async def _run_functional(run_id: int, checks: list[str], opts: dict,
+                          abort: asyncio.Event, resolved: list[targets.Target]) -> None:
     try:
-        await runner.run_functional(run_id, checks, opts, abort, metas)
+        await runner.run_functional(run_id, checks, opts, abort, resolved)
         summary = _summarize_functional(run_id)
         summary["regressions"] = _detect_regressions(run_id, "functional")
         db.finish_run(run_id, "aborted" if abort.is_set() else "done", summary)
@@ -323,31 +442,44 @@ async def _run_functional(run_id: int, checks: list[str], opts: dict, abort: asy
         ACTIVE_RUNS.pop(run_id, None)
 
 
-async def _run_bench(run_id: int, task: dict, opts: dict, abort: asyncio.Event, metas: dict) -> None:
+async def _run_bench(run_id: int, task: dict, opts: dict, abort: asyncio.Event,
+                     resolved: list[targets.Target]) -> None:
     try:
-        semaphore = asyncio.Semaphore(max(1, int(opts["concurrency"])))
+        concurrency = max(1, int(opts["concurrency"]))
+        global_semaphore = asyncio.Semaphore(concurrency)
+        provider_sems: dict[int, asyncio.Semaphore] = {}
+        for target in resolved:
+            limit = int(target.provider.get("max_concurrency") or concurrency)
+            provider_sems[target.provider_id] = asyncio.Semaphore(max(1, limit))
 
-        async def one(row: dict) -> None:
-            async with semaphore:
-                if abort.is_set():
-                    db.update_run_model(row["id"], status="skipped", outcome="aborted", finished_at=_now())
-                    return
-                db.update_run_model(row["id"], status="running", started_at=_now())
-                workspace = (config.BASE_DIR / row["workspace"]).resolve()
-                workspace.mkdir(parents=True, exist_ok=True)
-                try:
-                    outcome, metrics = await agent_loop.run_model_task(
-                        run_id=run_id, rm_id=row["id"], model=row["model"], task=task,
-                        workspace=workspace, opts=opts, abort=abort, meta=metas.get(row["model"], {}),
-                    )
-                    db.update_run_model(row["id"], status="done", outcome=outcome,
-                                        metrics=metrics, finished_at=_now())
-                except Exception as exc:  # noqa: BLE001
-                    db.update_run_model(row["id"], status="error",
-                                        error=f"{type(exc).__name__}: {exc}", finished_at=_now())
+        async def one(target: targets.Target) -> None:
+            rm_id = target.run_model_id
+            if rm_id is None:
+                return
+            async with provider_sems[target.provider_id]:
+                async with global_semaphore:
+                    if abort.is_set():
+                        db.update_run_model(rm_id, status="skipped", outcome="aborted",
+                                            finished_at=_now())
+                        return
+                    db.update_run_model(rm_id, status="running", started_at=_now())
+                    row = db.get_run_model(rm_id) or {}
+                    workspace = (config.BASE_DIR / row["workspace"]).resolve() \
+                        if row.get("workspace") else (config.BASE_DIR / "data" / "bench" / str(run_id)).resolve()
+                    workspace.mkdir(parents=True, exist_ok=True)
+                    try:
+                        outcome, metrics = await agent_loop.run_model_task(
+                            run_id=run_id, target=target, task=task,
+                            workspace=workspace, opts=opts, abort=abort,
+                        )
+                        db.update_run_model(rm_id, status="done", outcome=outcome,
+                                            metrics=metrics, finished_at=_now())
+                    except Exception as exc:  # noqa: BLE001
+                        db.update_run_model(rm_id, status="error",
+                                            error=f"{type(exc).__name__}: {exc}",
+                                            finished_at=_now())
 
-        rows = db.get_run_models(run_id)
-        await asyncio.gather(*(one(row) for row in rows))
+        await asyncio.gather(*(one(target) for target in resolved))
         summary = _summarize_bench(run_id)
         summary["regressions"] = _detect_regressions(run_id, "bench")
         db.finish_run(run_id, "aborted" if abort.is_set() else "done", summary)
@@ -384,7 +516,7 @@ def _median(values: list[float]) -> Optional[float]:
 
 
 def _detect_regressions(run_id: int, kind: str) -> int:
-    """Flag models that regressed vs the median of their prior 5 runs."""
+    """Flag targets that regressed vs the median of their prior 5 runs."""
     metric = KIND_METRIC.get(kind)
     if not metric:
         return 0
@@ -396,8 +528,11 @@ def _detect_regressions(run_id: int, kind: str) -> int:
         current = metrics.get(metric)
         if current is None:
             continue
-        history = db.model_history(row["model"], kind, run_id, 5)
-        prevs = [h["metrics"].get(metric) for h in history if h["metrics"].get(metric) is not None]
+        history = db.model_history(
+            row.get("provider_id"), row["model"], kind, run_id, 5,
+        )
+        prevs = [h["metrics"].get(metric) for h in history
+                 if h["metrics"].get(metric) is not None]
         baseline = _median(prevs)
         if not baseline:
             continue
@@ -415,19 +550,79 @@ def _detect_regressions(run_id: int, kind: str) -> int:
     return count
 
 
-@app.get("/api/speed-comparison")
-def speed_comparison() -> dict:
-    """Per-model speed comparison (tok/s, TTFT, throughput) with overall score."""
-    return speed.comparison()
+# --- comparison ------------------------------------------------------------
 
+def _parse_provider_ids(raw: Optional[str]) -> Optional[list[int]]:
+    if not raw:
+        return None
+    ids = [int(part) for part in raw.split(",") if part.strip().isdigit()]
+    return ids or None
+
+
+def _comparison_payload(
+    *, run_id: Optional[int], provider_ids: Optional[str],
+    window: int, mode: str, top_n: int,
+) -> dict:
+    ids = _parse_provider_ids(provider_ids)
+    if run_id is not None:
+        run = db.get_run(run_id)
+        if not run:
+            raise HTTPException(404, "Run tidak ditemukan")
+        rows = db.get_run_models(run_id)
+        if ids:
+            rows = [row for row in rows if row.get("provider_id") in ids]
+        return comparison.build_comparison(
+            rows, run_id=run_id, scope="run", top_n=top_n,
+        )
+    rows = db.all_run_models_with_runs(["functional"], provider_ids=ids)
+    return comparison.build_from_history(
+        rows, mode=mode, window=window, top_n=top_n,
+    )
+
+
+@app.get("/api/comparison")
+def api_comparison(
+    run_id: Optional[int] = None,
+    provider_ids: Optional[str] = None,
+    window: int = 5,
+    mode: str = "latest",
+    top_n: int = 20,
+) -> dict:
+    return _comparison_payload(
+        run_id=run_id, provider_ids=provider_ids,
+        window=max(1, window), mode=mode, top_n=max(1, top_n),
+    )
+
+
+@app.get("/api/comparison/providers")
+def api_comparison_providers(
+    run_id: Optional[int] = None,
+    provider_ids: Optional[str] = None,
+    window: int = 5,
+    mode: str = "latest",
+) -> dict:
+    payload = _comparison_payload(
+        run_id=run_id, provider_ids=provider_ids,
+        window=max(1, window), mode=mode, top_n=1000,
+    )
+    return {"providers": payload["providers"], "weights": payload["weights"]}
+
+
+# --- history / runs --------------------------------------------------------
 
 @app.get("/api/models/history")
-def model_history_api(model: str, kind: str, limit: int = 20) -> dict:
+def model_history_api(
+    model: str,
+    kind: str,
+    provider_id: Optional[int] = None,
+    limit: int = 20,
+) -> dict:
     metric = KIND_METRIC.get(kind)
-    rows = db.model_history(model, kind, None, limit)
+    rows = db.model_history(provider_id, model, kind, None, limit)
     points = [{"run_id": r["run_id"], "started_at": r["started_at"],
                "value": (r["metrics"] or {}).get(metric)} for r in rows]
-    return {"model": model, "kind": kind, "metric": metric, "points": points}
+    return {"provider_id": provider_id, "model": model, "kind": kind,
+            "metric": metric, "points": points}
 
 
 @app.post("/api/runs/{run_id}/abort")
@@ -463,7 +658,8 @@ def model_detail(run_id: int, rm_id: int) -> dict:
 # --- benchmark artifacts ---------------------------------------------------
 
 def _workspace_of(row: dict) -> Path:
-    return (config.BASE_DIR / row["workspace"]).resolve() if row.get("workspace") else (config.BASE_DIR / "data" / "bench").resolve()
+    return (config.BASE_DIR / row["workspace"]).resolve() if row.get("workspace") \
+        else (config.BASE_DIR / "data" / "bench").resolve()
 
 
 @app.get("/api/bench/{rm_id}/files")
@@ -476,7 +672,8 @@ def bench_files(rm_id: int) -> dict:
     if workspace.exists():
         for path in sorted(workspace.rglob("*")):
             if path.is_file():
-                files.append({"path": path.relative_to(workspace).as_posix(), "size": path.stat().st_size})
+                files.append({"path": path.relative_to(workspace).as_posix(),
+                              "size": path.stat().st_size})
             if len(files) >= 500:
                 break
     return {"files": files, "workspace": str(workspace)}
